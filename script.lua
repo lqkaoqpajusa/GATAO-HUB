@@ -220,6 +220,24 @@ task.spawn(function()
     end
 end)
 
+task.spawn(function()
+    while true do
+        task.wait(0.5)
+        pcall(function()
+            local c = ch() if not c then return end
+            local tool = c:FindFirstChildOfClass("Tool")
+            if tool and tool.ToolTip == "Blox Fruit" then return end
+            local bp = lp:FindFirstChild("Backpack") if not bp then return end
+            for _, item in ipairs(bp:GetChildren()) do
+                if item:IsA("Tool") and item.ToolTip == "Blox Fruit" then
+                    lp.Character.Humanoid:EquipTool(item)
+                    return
+                end
+            end
+        end)
+    end
+end)
+
 local lockConn   = nil
 local charConn   = nil
 local searching  = false

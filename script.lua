@@ -19,9 +19,8 @@ local lp           = Players.LocalPlayer
 local ch           = function() return lp.Character end
 
 local CFG = {
-    TELEPORT_INTERVAL = 10,
-    HOP_INTERVAL      = 300,
-    RAID_DIST         = 300,
+    HOP_INTERVAL = 300,
+    RAID_DIST    = 300,
 }
 
 local ST = {
@@ -221,13 +220,16 @@ task.spawn(function()
     end
 end)
 
-local notifConn = nil
+local lockConn   = nil
+local charConn   = nil
+local searching  = false
+
 local function showNotif(name)
     pcall(function()
         game:GetService("StarterGui"):SetCore("SendNotification", {
             Title    = "⚡ TRon Void  |  Alvo",
             Text     = "Atacando: " .. name,
-            Duration = 4,
+            Duration = 5,
         })
     end)
 end
@@ -246,52 +248,90 @@ local function getValidTargets()
     return list
 end
 
-local function jumpToNext()
-    if not ST.farmOn then return end
+local function lockOnTarget(targ)
+    if lockConn  then lockConn:Disconnect()  lockConn  = nil end
+    if charConn  then charConn:Disconnect()  charConn  = nil end
+
+    if not targ or not targ.Character then return end
+
+    local thrp = targ.Character:FindFirstChild("HumanoidRootPart")
+    if not thrp then return end
+
     local myC   = ch()
     local myHRP = myC and myC:FindFirstChild("HumanoidRootPart")
-    if not myHRP then return end
-
-    if inSafe(myHRP) and not ST.escapingZone then
-        local list = getValidTargets()
-        task.spawn(function() escapeAndTeleport(#list > 0 and list[1] or nil) end)
-        return
+    if myHRP then
+        pcall(function() myHRP.CFrame = thrp.CFrame * CFrame.new(0, 2, 3) end)
     end
 
-    local list = getValidTargets()
-    if #list == 0 then getgenv().targ = nil return end
-    ST.targIdx = (ST.targIdx % #list) + 1
-    local targ = list[ST.targIdx]
-    if not targ or not targ.Character then return end
-    local thrp = targ.Character:FindFirstChild("HumanoidRootPart")
-    if thrp then
-        pcall(function() myHRP.CFrame = thrp.CFrame * CFrame.new(0, 2, 3) end)
-        getgenv().targ = targ
-        showNotif(targ.Name)
+    getgenv().targ = targ
+    showNotif(targ.Name)
 
-        if notifConn then notifConn:Disconnect() notifConn = nil end
-        local hum = targ.Character:FindFirstChild("Humanoid")
-        if hum then
-            notifConn = hum.Died:Connect(function()
-                if notifConn then notifConn:Disconnect() notifConn = nil end
-                task.wait(0.15)
-                jumpToNext()
+    local hum = targ.Character:FindFirstChild("Humanoid")
+    if hum then
+        lockConn = hum.Died:Connect(function()
+            if lockConn then lockConn:Disconnect() lockConn = nil end
+            if charConn then charConn:Disconnect() charConn = nil end
+            task.wait(0.2)
+            getgenv().targ = nil
+            ST.targIdx += 1
+            task.spawn(function()
+                local list = getValidTargets()
+                if #list == 0 then
+                    searching = true
+                    repeat task.wait(1) list = getValidTargets() until #list > 0
+                    searching = false
+                end
+                local idx = (ST.targIdx - 1) % #list + 1
+                lockOnTarget(list[idx])
             end)
-        end
-        targ.CharacterRemoving:Connect(function()
-            if getgenv().targ == targ then
-                task.wait(0.15)
-                jumpToNext()
-            end
         end)
     end
+
+    charConn = targ.CharacterRemoving:Connect(function()
+        if lockConn then lockConn:Disconnect() lockConn = nil end
+        if charConn then charConn:Disconnect() charConn = nil end
+        task.wait(0.2)
+        getgenv().targ = nil
+        ST.targIdx += 1
+        task.spawn(function()
+            local list = getValidTargets()
+            if #list == 0 then
+                searching = true
+                repeat task.wait(1) list = getValidTargets() until #list > 0
+                searching = false
+            end
+            local idx = (ST.targIdx - 1) % #list + 1
+            lockOnTarget(list[idx])
+        end)
+    end)
 end
 
 task.spawn(function()
+    repeat task.wait() until game:IsLoaded()
+    repeat task.wait() until lp and lp.Character
+    task.wait(3)
+    local list = getValidTargets()
+    if #list == 0 then
+        searching = true
+        repeat task.wait(1) list = getValidTargets() until #list > 0
+        searching = false
+    end
+    lockOnTarget(list[1])
+end)
+
+task.spawn(function()
     while true do
-        task.wait(CFG.TELEPORT_INTERVAL)
+        task.wait(1.5)
         if not ST.farmOn then continue end
-        jumpToNext()
+        local targ  = getgenv().targ
+        if not targ or not targ.Character then continue end
+        local myC   = ch()
+        local myHRP = myC and myC:FindFirstChild("HumanoidRootPart")
+        local thrp  = targ.Character:FindFirstChild("HumanoidRootPart")
+        local hum   = targ.Character:FindFirstChild("Humanoid")
+        if myHRP and thrp and hum and hum.Health > 0 then
+            pcall(function() myHRP.CFrame = thrp.CFrame * CFrame.new(0, 2, 3) end)
+        end
     end
 end)
 

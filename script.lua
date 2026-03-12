@@ -1,467 +1,1017 @@
-repeat wait() until game:IsLoaded() and game.Players.LocalPlayer:FindFirstChild("DataLoaded")
-if game:GetService("Players").LocalPlayer.PlayerGui:FindFirstChild("Main (minimal)") then
-    repeat
-        wait()
-        game.ReplicatedStorage:WaitForChild("Remotes").CommF_:InvokeServer("SetTeam", getgenv().team)
-        task.wait(3)
-    until not game:GetService("Players").LocalPlayer.PlayerGui:FindFirstChild("Main (minimal)")
-end
-repeat task.wait() until game.Players.LocalPlayer.PlayerGui:FindFirstChild("Main")
+if not getgenv().TRonVoid then error("[TRon Void] Config nao encontrada!") return end
 
-local Players      = game:GetService("Players")
-local RunService   = game:GetService("RunService")
-local TweenService = game:GetService("TweenService")
-local TeleSvc      = game:GetService("TeleportService")
-local HttpSvc      = game:GetService("HttpService")
-local UserInput    = game:GetService("UserInputService")
-local lp           = Players.LocalPlayer
-local ch           = function() return lp.Character end
+local Config = getgenv().TRonVoid
 
-local HOP_INTERVAL = 300
-local RAID_DIST    = 300
-local ServerBlacklist = {}
+Config["Team"]             = Config["Team"]             or "Pirates"
+Config["Mode"]             = Config["Mode"]             or "Normal"
+Config["Fix Lag"]          = Config["Fix Lag"]          ~= nil and Config["Fix Lag"] or true
+Config["Auto Hop After"]   = Config["Auto Hop After"]   or 300
+Config["Safe Mode"]        = Config["Safe Mode"]        ~= nil and Config["Safe Mode"] or true
+Config["Run Away HP"]      = Config["Run Away HP"]      or 2000
+Config["Return HP"]        = Config["Return HP"]        or 5000
+Config["Level Difference"] = Config["Level Difference"] or 999
+Config["Auto Race V3"]     = Config["Auto Race V3"]     or false
+Config["Auto Race V4"]     = Config["Auto Race V4"]     or false
+Config["Skills Melee"]     = Config["Skills Melee"]     or {["Z"]=true,  ["X"]=true,  ["C"]=false}
+Config["Skills Fruit"]     = Config["Skills Fruit"]     or {["Z"]=true,  ["X"]=true,  ["C"]=false, ["V"]=false, ["F"]=true}
+Config["Skills Sword"]     = Config["Skills Sword"]     or {["Z"]=true,  ["X"]=false}
+Config["Skills Gun"]       = Config["Skills Gun"]       or {["Z"]=true,  ["X"]=true}
 
-local ST = {
-    bountyEarned = 0,
-    lastBounty   = 0,
-    targIdx      = 1,
-    hopTimer     = 0,
-    escapingZone = false,
+local Players             = game:GetService("Players")
+local RunService          = game:GetService("RunService")
+local TweenService        = game:GetService("TweenService")
+local ReplicatedStorage   = game:GetService("ReplicatedStorage")
+local Workspace           = game:GetService("Workspace")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local Lighting            = game:GetService("Lighting")
+local TeleportService     = game:GetService("TeleportService")
+
+local LP = Players.LocalPlayer
+
+local PURPLE       = Color3.fromRGB(148, 0, 211)
+local PURPLE_DARK  = Color3.fromRGB(80,  0, 140)
+local PURPLE_LIGHT = Color3.fromRGB(190, 80, 255)
+local PURPLE_MID   = Color3.fromRGB(120, 0, 180)
+
+local State = {
+	running       = true,
+	currentTarget = nil,
+	targetName    = "None",
+	status        = "Iniciando...",
+	hopTimer      = 0,
+	retreating    = false,
+	kobyLoaded    = false,
+	gunNetReady   = false,
 }
 
-local function getCurrentBounty()
-    local ok, v = pcall(function() return lp.Data.Bounty.Value end)
-    return ok and v or 0
+local function SafeCall(fn, ...)
+	local ok, err = pcall(fn, ...)
 end
 
-local function getTeamName()
-    return lp.Team and lp.Team.Name or "None"
+local function GetMyChar()
+	return LP.Character
 end
 
-local function getPVPCount()
-    local n = 0
-    pcall(function()
-        for _, p in ipairs(Players:GetPlayers()) do
-            if p ~= lp and p.Character then
-                local hrp = p.Character:FindFirstChild("HumanoidRootPart")
-                if hrp then
-                    if p.Character:FindFirstChild("PVP") or
-                       (p.PlayerGui:FindFirstChild("Main") and p.PlayerGui.Main:FindFirstChild("PVP")) then
-                        n += 1
-                    end
-                end
-            end
-        end
-    end)
-    return n
+local function GetMyHRP()
+	local char = GetMyChar()
+	return char and char:FindFirstChild("HumanoidRootPart")
 end
 
-local function inSafe(hrp)
-    local r = false
-    pcall(function()
-        local wo = workspace["_WorldOrigin"]
-        if wo and wo:FindFirstChild("SafeZones") then
-            for _, v in pairs(wo.SafeZones:GetChildren()) do
-                if v:IsA("BasePart") and (v.Position - hrp.Position).Magnitude <= 450 then r = true return end
-            end
-        end
-        if r then return end
-        local g = lp.PlayerGui:FindFirstChild("Main") if not g then return end
-        for _, n in ipairs({"SafeZone","[OLD]SafeZone"}) do
-            local f = g:FindFirstChild(n)
-            if f and f.Visible then r = true return end
-        end
-    end)
-    return r
+local function GetMyHumanoid()
+	local char = GetMyChar()
+	return char and char:FindFirstChild("Humanoid")
 end
 
-local function checkRaid(plr)
-    local r = false
-    pcall(function()
-        local wo = workspace["_WorldOrigin"] if not wo then return end
-        local locs = wo:FindFirstChild("Locations") if not locs then return end
-        local isl  = locs:FindFirstChild("Island 1") if not isl then return end
-        local hrp  = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
-        if hrp and (hrp.Position - isl.Position).Magnitude < RAID_DIST then r = true end
-    end)
-    return r
+local function GetMyHP()
+	local hum = GetMyHumanoid()
+	return hum and hum.Health or 0
 end
 
-local function hopServer()
-    local ok = pcall(function()
-        table.insert(ServerBlacklist, game.JobId)
-        local data = HttpSvc:JSONDecode(game:HttpGet(
-            ("https://games.roblox.com/v1/games/%d/servers/Public?limit=100"):format(game.PlaceId)))
-        local Z
-        local function notBL(id)
-            for _, b in ipairs(ServerBlacklist) do if b == id then return false end end
-            return true
-        end
-        for _, s in ipairs(data.data) do
-            if s.playing and s.maxPlayers and s.playing > 5 and s.playing < s.maxPlayers - 2 and notBL(s.id) then
-                Z = s break
-            end
-        end
-        if not Z then
-            for _, s in ipairs(data.data) do
-                if s.playing and s.maxPlayers and s.playing > 10 and s.playing < s.maxPlayers and notBL(s.id) then
-                    Z = s break
-                end
-            end
-        end
-        if not Z and #data.data > 0 then
-            for _, s in ipairs(data.data) do if notBL(s.id) then Z = s break end end
-        end
-        if not Z and #data.data > 0 then Z = data.data[1] end
-        if Z and Z.id then TeleSvc:TeleportToPlaceInstance(game.PlaceId, Z.id)
-        else TeleSvc:Teleport(game.PlaceId) end
-    end)
-    if not ok then TeleSvc:Teleport(game.PlaceId) end
+local function IsCharAlive(char)
+	if not char then return false end
+	local hum = char:FindFirstChild("Humanoid")
+	return hum ~= nil and hum.Health > 0
 end
 
-local function onKick()
-    task.spawn(function()
-        local ok = pcall(hopServer)
-        if not ok then pcall(function() TeleSvc:Teleport(game.PlaceId) end) end
-    end)
+local function GetPlayerLevel(player)
+	local ls = player:FindFirstChild("leaderstats")
+	if ls then
+		local lv = ls:FindFirstChild("Level") or ls:FindFirstChild("Lv") or ls:FindFirstChild("level")
+		if lv then return tonumber(lv.Value) or 0 end
+	end
+	return 0
 end
 
-lp.AncestryChanged:Connect(function(_, p) if not p then onKick() end end)
-Players.PlayerRemoving:Connect(function(p) if p == lp then onKick() end end)
-lp.OnTeleport:Connect(function(s) if s == Enum.TeleportState.Failed then onKick() end end)
-game:BindToClose(onKick)
+local SAFE_ZONES = {
+	{pos = Vector3.new(-800,   100, -1500), range = 350},
+	{pos = Vector3.new( 1000,  100,  1000), range = 450},
+	{pos = Vector3.new(-3000,  100,     0), range = 350},
+	{pos = Vector3.new(-3000,  200, -3000), range = 550},
+	{pos = Vector3.new( 1000,  200, -1000), range = 400},
+	{pos = Vector3.new(  200,   80,   200), range = 300},
+	{pos = Vector3.new( -270,   80,   650), range = 280},
+	{pos = Vector3.new( 5000,  300,  5000), range = 650},
+	{pos = Vector3.new(-5000,  300,  1000), range = 500},
+	{pos = Vector3.new( 9000,  300,  9000), range = 450},
+	{pos = Vector3.new( 2000,  150,  3000), range = 400},
+	{pos = Vector3.new(-7500,  400,  3500), range = 500},
+	{pos = Vector3.new( 4500,  250, -1000), range = 400},
+	{pos = Vector3.new(-13000, 100, -3000), range = 500},
+	{pos = Vector3.new(-12000, 200,  1000), range = 400},
+	{pos = Vector3.new(-11000, 300, -2000), range = 450},
+	{pos = Vector3.new(-15000, 100,   500), range = 500},
+	{pos = Vector3.new(-16500, 100,  2500), range = 350},
+}
 
-pcall(function()
-    local oldClose = game.Close
-    game.Close = function(...)
-        onKick()
-        return oldClose(...)
-    end
-end)
+local function IsInSafeZone(pos)
+	for _, zone in ipairs(SAFE_ZONES) do
+		if (pos - zone.pos).Magnitude < zone.range then return true end
+	end
+	return false
+end
+
+local function IsWorldRestricted()
+	local mapNode = Workspace:FindFirstChild("Map")
+	local mapName = mapNode and mapNode.Name or ""
+	for _, kw in ipairs({"raid","leviathan","dungeon","boss","colosseum","arena","castle"}) do
+		if string.find(mapName:lower(), kw) then return true end
+	end
+	if Workspace:FindFirstChild("Raid")       then return true end
+	if Workspace:FindFirstChild("RaidIsland") then return true end
+	if Workspace:FindFirstChild("RaidBoss")   then return true end
+	return false
+end
+
+local function PlayerHasPvP(player)
+	local found = false
+	SafeCall(function()
+		for _, guiChild in ipairs(LP.PlayerGui:GetChildren()) do
+			for _, desc in ipairs(guiChild:GetDescendants()) do
+				if desc:IsA("TextLabel") then
+					local txt = desc.Text or ""
+					if txt == player.DisplayName or txt == player.Name or txt == "@"..player.Name then
+						for _, sib in ipairs(desc.Parent:GetChildren()) do
+							if sib:IsA("ImageLabel") and string.find(sib.Name:upper(), "PVP") then
+								if sib.Visible and sib.ImageTransparency <= 0.5 then found = true end
+							end
+						end
+					end
+				end
+			end
+		end
+	end)
+	if found then return true end
+	SafeCall(function()
+		local ls = player:FindFirstChild("leaderstats")
+		if ls then
+			local b = ls:FindFirstChild("Bounty") or ls:FindFirstChild("Kills")
+			if b and (tonumber(b.Value) or 0) > 0 then found = true end
+		end
+	end)
+	return found
+end
+
+local function IsValidTarget(player)
+	if not player or player == LP then return false end
+	local char = player.Character
+	if not char then return false end
+	local hrp = char:FindFirstChild("HumanoidRootPart")
+	if not hrp then return false end
+	if not IsCharAlive(char) then return false end
+	if not PlayerHasPvP(player) then return false end
+	if IsInSafeZone(hrp.Position) then return false end
+	if IsWorldRestricted() then return false end
+	local myLv = GetPlayerLevel(LP)
+	local tgLv = GetPlayerLevel(player)
+	if math.abs(myLv - tgLv) > Config["Level Difference"] then return false end
+	return true
+end
+
+local function GetValidTargets()
+	local list = {}
+	for _, p in ipairs(Players:GetPlayers()) do
+		if IsValidTarget(p) then table.insert(list, p) end
+	end
+	return list
+end
+
+local function GetNearestTarget(targets)
+	local myHRP = GetMyHRP()
+	if not myHRP then return nil end
+	local best, bestDist = nil, math.huge
+	for _, p in ipairs(targets) do
+		local char = p.Character
+		if char then
+			local hrp = char:FindFirstChild("HumanoidRootPart")
+			if hrp then
+				local d = (myHRP.Position - hrp.Position).Magnitude
+				if d < bestDist then bestDist = d best = p end
+			end
+		end
+	end
+	return best
+end
+
+local function TweenTo(targetPos)
+	local myHRP = GetMyHRP()
+	if not myHRP then return end
+	local tw = TweenService:Create(myHRP, TweenInfo.new(0.3, Enum.EasingStyle.Linear), {
+		CFrame = CFrame.new(targetPos + Vector3.new(0, 4, 0))
+	})
+	tw:Play()
+	tw.Completed:Wait()
+end
+
+local function TeleportToPlayer(player)
+	local char = player and player.Character
+	local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+	if not hrp then return end
+	local myHRP = GetMyHRP()
+	if not myHRP then return end
+	if (myHRP.Position - hrp.Position).Magnitude > 200 then
+		SafeCall(function() myHRP.CFrame = CFrame.new(hrp.Position + Vector3.new(0, 6, 0)) end)
+		task.wait(0.08)
+	end
+	TweenTo(hrp.Position)
+end
+
+local function InstantTeleportToPlayer(player)
+	local char = player and player.Character
+	local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+	if not hrp then return end
+	local myHRP = GetMyHRP()
+	if not myHRP then return end
+	SafeCall(function() myHRP.CFrame = CFrame.new(hrp.Position + Vector3.new(0, 4, 0)) end)
+end
+
+local function CheckSafeMode()
+	if not Config["Safe Mode"] then return false end
+	local hp = GetMyHP()
+	if not State.retreating and hp > 0 and hp <= Config["Run Away HP"] then
+		State.retreating = true
+		State.status = "SAFE MODE: HP baixo! Recuando... (" .. math.floor(hp) .. " HP)"
+		local myHRP = GetMyHRP()
+		if myHRP then
+			SafeCall(function()
+				myHRP.CFrame = CFrame.new(
+					myHRP.Position.X + math.random(-800, 800),
+					myHRP.Position.Y + 60,
+					myHRP.Position.Z + math.random(-800, 800)
+				)
+			end)
+		end
+		return true
+	end
+	if State.retreating then
+		if hp >= Config["Return HP"] then
+			State.retreating = false
+			State.status = "HP recuperado! Voltando ao combate..."
+			return false
+		end
+		State.status = "Recuperando HP: " .. math.floor(hp) .. " / " .. Config["Return HP"]
+		return true
+	end
+	return false
+end
+
+local heartConn = nil
+
+local function StartFastAttackHeart()
+	if heartConn then return end
+	heartConn = RunService.Heartbeat:Connect(function()
+		SafeCall(function()
+			local v = require(ReplicatedStorage.Util.CombatFramework).GetActiveController()
+			if v then
+				v.timeToNextAttack = -(math.huge ^ math.huge ^ math.huge)
+				v.hitboxMagnitude  = 120
+				v:attack()
+			end
+		end)
+	end)
+end
+
+local function LoadKobyAttack()
+	if State.kobyLoaded then return end
+	State.kobyLoaded = true
+	State.status = "Carregando Fast Attack Koby..."
+	SafeCall(function()
+		loadstring(game:HttpGet("https://raw.githubusercontent.com/AnhDangNhoEm/TuanAnhIOS/refs/heads/main/koby"))()
+	end)
+end
+
+local gunNetModule = nil
+
+local function SetupGunNet()
+	if State.gunNetReady then return end
+	SafeCall(function()
+		local folders = {
+			ReplicatedStorage:FindFirstChild("Util"),
+			ReplicatedStorage:FindFirstChild("Common"),
+			ReplicatedStorage:FindFirstChild("Remotes"),
+			ReplicatedStorage:FindFirstChild("Assets"),
+			ReplicatedStorage:FindFirstChild("FX"),
+		}
+		for _, folder in ipairs(folders) do
+			if folder then
+				folder.ChildAdded:Connect(function(n)
+					if n:IsA("RemoteEvent") and n:GetAttribute("Id") then end
+				end)
+			end
+		end
+		gunNetModule = ReplicatedStorage:FindFirstChild("Modules") and
+		               ReplicatedStorage.Modules:FindFirstChild("Net")
+		State.gunNetReady = true
+	end)
+end
+
+local function GetNearestGunTarget()
+	local myHRP = GetMyHRP()
+	if not myHRP then return nil end
+	local best, bestDist = nil, math.huge
+	local enemiesFolder = Workspace:FindFirstChild("Enemies")
+	if enemiesFolder then
+		for _, mob in ipairs(enemiesFolder:GetChildren()) do
+			local hrp = mob:FindFirstChild("HumanoidRootPart")
+			if hrp and IsCharAlive(mob) then
+				local d = (myHRP.Position - hrp.Position).Magnitude
+				if d < bestDist then bestDist = d best = hrp end
+			end
+		end
+	end
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p ~= LP and p.Character and IsValidTarget(p) then
+			local hrp = p.Character:FindFirstChild("HumanoidRootPart")
+			if hrp and IsCharAlive(p.Character) then
+				local d = (myHRP.Position - hrp.Position).Magnitude
+				if d < bestDist then bestDist = d best = hrp end
+			end
+		end
+	end
+	return best
+end
+
+local function FireGunShot(targetHRP)
+	if not targetHRP then return end
+	local char = GetMyChar()
+	local tool = char and char:FindFirstChildOfClass("Tool")
+	if not tool or tool:GetAttribute("WeaponType") ~= "Gun" then return end
+	SafeCall(function()
+		if gunNetModule then
+			local shootEvent = gunNetModule:FindFirstChild("RE/ShootGunEvent")
+			if shootEvent then shootEvent:FireServer(targetHRP.Position, {targetHRP}) end
+		end
+		VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true,  game, 1)
+		VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
+	end)
+end
+
+local function PressKey(keyCode)
+	SafeCall(function()
+		VirtualInputManager:SendKeyEvent(true,  keyCode, false, game)
+		task.wait(0.08)
+		VirtualInputManager:SendKeyEvent(false, keyCode, false, game)
+	end)
+end
+
+local function UseSkills()
+	local mode = Config["Mode"]
+	if mode == "Normal" then
+		if Config["Skills Melee"]["Z"] then PressKey(Enum.KeyCode.Z) end
+		if Config["Skills Melee"]["X"] then PressKey(Enum.KeyCode.X) end
+		if Config["Skills Melee"]["C"] then PressKey(Enum.KeyCode.C) end
+		if Config["Skills Fruit"]["Z"]  then PressKey(Enum.KeyCode.Z) end
+		if Config["Skills Fruit"]["X"]  then PressKey(Enum.KeyCode.X) end
+		if Config["Skills Fruit"]["C"]  then PressKey(Enum.KeyCode.C) end
+		if Config["Skills Fruit"]["V"]  then PressKey(Enum.KeyCode.V) end
+		if Config["Skills Fruit"]["F"]  then PressKey(Enum.KeyCode.F) end
+	elseif mode == "Sword" then
+		if Config["Skills Sword"]["Z"] then PressKey(Enum.KeyCode.Z) end
+		if Config["Skills Sword"]["X"] then PressKey(Enum.KeyCode.X) end
+	elseif mode == "Gun" then
+		if Config["Skills Gun"]["Z"] then PressKey(Enum.KeyCode.Z) end
+		if Config["Skills Gun"]["X"] then PressKey(Enum.KeyCode.X) end
+	end
+end
+
+local function EquipWeapon(weaponType)
+	SafeCall(function()
+		local char = GetMyChar()
+		if not char then return end
+		local hum = char:FindFirstChild("Humanoid")
+		if not hum then return end
+		local current = char:FindFirstChildOfClass("Tool")
+		if current and current:GetAttribute("WeaponType") == weaponType then return end
+		for _, tool in ipairs(LP.Backpack:GetChildren()) do
+			if tool:IsA("Tool") and tool:GetAttribute("WeaponType") == weaponType then
+				hum:EquipTool(tool)
+				task.wait(0.3)
+				return
+			end
+		end
+	end)
+end
+
+local function JoinTeam(teamName)
+	State.status = "Entrando no time: " .. teamName
+	SafeCall(function()
+		local remoteNames = {"ChooseTeam","JoinTeam","SelectTeam","ChangeTeam","TeamSelect"}
+		local remotesFolder = ReplicatedStorage:FindFirstChild("Remotes")
+		if remotesFolder then
+			for _, name in ipairs(remoteNames) do
+				local r = remotesFolder:FindFirstChild(name)
+				if r and r:IsA("RemoteEvent") then r:FireServer(teamName) task.wait(0.5) return end
+			end
+		end
+		for _, v in ipairs(ReplicatedStorage:GetDescendants()) do
+			if v:IsA("RemoteEvent") then
+				local nm = v.Name:lower()
+				if string.find(nm, "team") or string.find(nm, "chooseside") then
+					SafeCall(function() v:FireServer(teamName) end)
+				end
+			end
+		end
+	end)
+	task.wait(2)
+end
+
+local function ApplyFixLag()
+	if not Config["Fix Lag"] then return end
+	State.status = "Aplicando Fix Lag..."
+	SafeCall(function() settings().Rendering.QualityLevel = 1 end)
+	Lighting.GlobalShadows = false
+	Lighting.FogEnd        = 9e9
+	SafeCall(function()
+		for _, v in ipairs(Workspace:GetDescendants()) do
+			SafeCall(function()
+				if v:IsA("BasePart") or v:IsA("UnionOperation") or v:IsA("PartOperation") then
+					v.Material   = Enum.Material.SmoothPlastic
+					v.CastShadow = false
+				elseif v:IsA("Decal") or v:IsA("Texture") then
+					v.Transparency = 1
+				elseif v:IsA("SpecialMesh") then
+					v.TextureId = ""
+				elseif v:IsA("ParticleEmitter") or v:IsA("Beam") or v:IsA("Trail")
+				    or v:IsA("Smoke") or v:IsA("Fire") or v:IsA("Sparkles") then
+					v.Enabled = false
+				elseif v:IsA("PointLight") or v:IsA("SpotLight") or v:IsA("SurfaceLight") then
+					v.Enabled = false
+				end
+			end)
+		end
+	end)
+	Workspace.DescendantAdded:Connect(function(v)
+		SafeCall(function()
+			if v:IsA("ParticleEmitter") or v:IsA("Beam") or v:IsA("Trail")
+			    or v:IsA("Smoke") or v:IsA("Fire") or v:IsA("Sparkles") then
+				v.Enabled = false
+			elseif v:IsA("PointLight") or v:IsA("SpotLight") then
+				v.Enabled = false
+			end
+		end)
+	end)
+end
+
+local function ActivateRace()
+	SafeCall(function()
+		local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+		if not remotes then return end
+		if Config["Auto Race V4"] then
+			local r = remotes:FindFirstChild("ActivateRaceV4") or remotes:FindFirstChild("RaceV4") or remotes:FindFirstChild("Race_V4")
+			if r then r:FireServer() end
+		elseif Config["Auto Race V3"] then
+			local r = remotes:FindFirstChild("ActivateRaceV3") or remotes:FindFirstChild("RaceTransformation") or remotes:FindFirstChild("Race_V3")
+			if r then r:FireServer() end
+		end
+	end)
+end
+
+local function HopServer()
+	State.status = "Sem alvos. Trocando servidor em 5s..."
+	task.wait(5)
+	SafeCall(function() TeleportService:Teleport(game.PlaceId) end)
+end
+
+local function BuildUI()
+	SafeCall(function()
+		for _, g in ipairs(game:GetService("CoreGui"):GetChildren()) do
+			if g.Name == "TRonVoidMainCard" or g.Name == "TRonVoidStatusBar" or g.Name == "TRonVoidToggleBtn" then
+				g:Destroy()
+			end
+		end
+	end)
+
+	local blurFx  = Instance.new("BlurEffect")
+	blurFx.Size   = 0
+	blurFx.Parent = Lighting
+
+	local CardGui        = Instance.new("ScreenGui")
+	CardGui.Name         = "TRonVoidMainCard"
+	CardGui.Parent       = game:GetService("CoreGui")
+	CardGui.ResetOnSpawn = false
+	CardGui.DisplayOrder = 20
+	CardGui.Enabled      = false
+
+	local ShadowHolder              = Instance.new("Frame")
+	ShadowHolder.Parent             = CardGui
+	ShadowHolder.AnchorPoint        = Vector2.new(0.5, 0.5)
+	ShadowHolder.BackgroundTransparency = 1
+	ShadowHolder.Position           = UDim2.new(0.5, 0, 0.5, 0)
+	ShadowHolder.Size               = UDim2.new(0, 640, 0, 440)
+
+	local DropShadow             = Instance.new("ImageLabel")
+	DropShadow.Parent            = ShadowHolder
+	DropShadow.AnchorPoint       = Vector2.new(0.5, 0.5)
+	DropShadow.BackgroundTransparency = 1
+	DropShadow.Position          = UDim2.new(0.5, 0, 0.5, 0)
+	DropShadow.Size              = UDim2.new(1, 60, 1, 60)
+	DropShadow.ZIndex            = 0
+	DropShadow.Image             = "rbxassetid://6015897843"
+	DropShadow.ImageColor3       = Color3.fromRGB(80, 0, 130)
+	DropShadow.ImageTransparency = 0.2
+	DropShadow.ScaleType         = Enum.ScaleType.Slice
+	DropShadow.SliceCenter       = Rect.new(49, 49, 450, 450)
+
+	local Main                  = Instance.new("Frame")
+	Main.Name                   = "Main"
+	Main.Parent                 = ShadowHolder
+	Main.AnchorPoint            = Vector2.new(0.5, 0.5)
+	Main.BackgroundColor3       = Color3.fromRGB(12, 0, 25)
+	Main.BackgroundTransparency = 0.05
+	Main.Position               = UDim2.new(0.5, 0, 0.5, 0)
+	Main.Size                   = UDim2.new(1, -47, 1, -47)
+	Instance.new("UICorner", Main).CornerRadius = UDim.new(0, 10)
+
+	local Stroke     = Instance.new("UIStroke")
+	Stroke.Color     = PURPLE
+	Stroke.Thickness = 2.5
+	Stroke.Parent    = Main
+
+	local TitleLbl              = Instance.new("TextLabel")
+	TitleLbl.Name               = "TitleLabel"
+	TitleLbl.Parent             = Main
+	TitleLbl.AnchorPoint        = Vector2.new(0.5, 0)
+	TitleLbl.BackgroundTransparency = 1
+	TitleLbl.Position           = UDim2.new(0.5, 0, 0.03, 0)
+	TitleLbl.Size               = UDim2.new(0.92, 0, 0, 32)
+	TitleLbl.FontFace           = Font.new("rbxasset://fonts/families/GothamSSm.json", Enum.FontWeight.Bold, Enum.FontStyle.Normal)
+	TitleLbl.Text               = "TRon Void Hub Ez Bounty"
+	TitleLbl.TextColor3         = PURPLE_LIGHT
+	TitleLbl.TextSize           = 22
+	TitleLbl.TextWrapped        = true
+
+	local TitleGrad = Instance.new("UIGradient")
+	TitleGrad.Color = ColorSequence.new{
+		ColorSequenceKeypoint.new(0,   Color3.fromRGB(210, 100, 255)),
+		ColorSequenceKeypoint.new(0.5, Color3.fromRGB(255, 150, 255)),
+		ColorSequenceKeypoint.new(1,   Color3.fromRGB(210, 100, 255)),
+	}
+	TitleGrad.Parent = TitleLbl
+
+	local Div1            = Instance.new("Frame")
+	Div1.BackgroundColor3 = PURPLE_MID
+	Div1.BorderSizePixel  = 0
+	Div1.Parent           = Main
+	Div1.Position         = UDim2.new(0.04, 0, 0.18, 0)
+	Div1.Size             = UDim2.new(0.92, 0, 0, 1)
+
+	local ModeLbl               = Instance.new("TextLabel")
+	ModeLbl.Name                = "ModeLabel"
+	ModeLbl.Parent              = Main
+	ModeLbl.BackgroundTransparency = 1
+	ModeLbl.Position            = UDim2.new(0.04, 0, 0.21, 0)
+	ModeLbl.Size                = UDim2.new(0.92, 0, 0, 22)
+	ModeLbl.FontFace            = Font.new("rbxasset://fonts/families/GothamSSm.json", Enum.FontWeight.Bold, Enum.FontStyle.Normal)
+	ModeLbl.Text                = "Mode: " .. Config["Mode"] .. "   |   Team: " .. Config["Team"]
+	ModeLbl.TextColor3          = Color3.fromRGB(220, 170, 255)
+	ModeLbl.TextSize            = 14
+	ModeLbl.TextXAlignment      = Enum.TextXAlignment.Left
+
+	local TargetLbl               = Instance.new("TextLabel")
+	TargetLbl.Name                = "TargetLabel"
+	TargetLbl.Parent              = Main
+	TargetLbl.BackgroundTransparency = 1
+	TargetLbl.Position            = UDim2.new(0.04, 0, 0.30, 0)
+	TargetLbl.Size                = UDim2.new(0.92, 0, 0, 22)
+	TargetLbl.FontFace            = Font.new("rbxasset://fonts/families/GothamSSm.json", Enum.FontWeight.Bold, Enum.FontStyle.Normal)
+	TargetLbl.Text                = "Alvo Atual: Nenhum"
+	TargetLbl.TextColor3          = Color3.fromRGB(255, 210, 80)
+	TargetLbl.TextSize            = 14
+	TargetLbl.TextXAlignment      = Enum.TextXAlignment.Left
+
+	local StatusLbl               = Instance.new("TextLabel")
+	StatusLbl.Name                = "StatusLabel"
+	StatusLbl.Parent              = Main
+	StatusLbl.BackgroundTransparency = 1
+	StatusLbl.Position            = UDim2.new(0.04, 0, 0.39, 0)
+	StatusLbl.Size                = UDim2.new(0.92, 0, 0, 22)
+	StatusLbl.FontFace            = Font.new("rbxasset://fonts/families/GothamSSm.json", Enum.FontWeight.Bold, Enum.FontStyle.Normal)
+	StatusLbl.Text                = "Status: Iniciando..."
+	StatusLbl.TextColor3          = Color3.fromRGB(100, 255, 160)
+	StatusLbl.TextSize            = 14
+	StatusLbl.TextXAlignment      = Enum.TextXAlignment.Left
+	StatusLbl.TextWrapped         = true
+
+	local Div2            = Instance.new("Frame")
+	Div2.BackgroundColor3 = PURPLE_MID
+	Div2.BorderSizePixel  = 0
+	Div2.Parent           = Main
+	Div2.Position         = UDim2.new(0.04, 0, 0.49, 0)
+	Div2.Size             = UDim2.new(0.92, 0, 0, 1)
+
+	local ListHeader              = Instance.new("TextLabel")
+	ListHeader.Parent             = Main
+	ListHeader.BackgroundTransparency = 1
+	ListHeader.Position           = UDim2.new(0.04, 0, 0.52, 0)
+	ListHeader.Size               = UDim2.new(0.92, 0, 0, 18)
+	ListHeader.FontFace           = Font.new("rbxasset://fonts/families/GothamSSm.json", Enum.FontWeight.Bold, Enum.FontStyle.Normal)
+	ListHeader.Text               = "Jogadores com PvP Ativo (Fora da Safe Zone):"
+	ListHeader.TextColor3         = PURPLE_LIGHT
+	ListHeader.TextSize           = 13
+	ListHeader.TextXAlignment     = Enum.TextXAlignment.Left
+
+	local PlayerScroll                  = Instance.new("ScrollingFrame")
+	PlayerScroll.Name                   = "PlayerScroll"
+	PlayerScroll.Parent                 = Main
+	PlayerScroll.BackgroundTransparency = 1
+	PlayerScroll.Position               = UDim2.new(0.04, 0, 0.62, 0)
+	PlayerScroll.Size                   = UDim2.new(0.92, 0, 0.32, 0)
+	PlayerScroll.ScrollBarThickness     = 4
+	PlayerScroll.ScrollBarImageColor3   = PURPLE
+	PlayerScroll.CanvasSize             = UDim2.new(0, 0, 0, 0)
+	PlayerScroll.BorderSizePixel        = 0
+
+	local ListLayout     = Instance.new("UIListLayout")
+	ListLayout.Parent    = PlayerScroll
+	ListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	ListLayout.Padding   = UDim.new(0, 3)
+
+	local StatusGui        = Instance.new("ScreenGui")
+	StatusGui.Name         = "TRonVoidStatusBar"
+	StatusGui.Parent       = game:GetService("CoreGui")
+	StatusGui.ResetOnSpawn = false
+	StatusGui.DisplayOrder = 10
+
+	local SBarHolder                = Instance.new("Frame")
+	SBarHolder.Parent               = StatusGui
+	SBarHolder.AnchorPoint          = Vector2.new(0.5, 0)
+	SBarHolder.BackgroundTransparency = 1
+	SBarHolder.Position             = UDim2.new(0.5, 0, 0.03, 0)
+	SBarHolder.Size                 = UDim2.new(0, 380, 0, 74)
+
+	local SBarShadow             = Instance.new("ImageLabel")
+	SBarShadow.Parent            = SBarHolder
+	SBarShadow.AnchorPoint       = Vector2.new(0.5, 0.5)
+	SBarShadow.BackgroundTransparency = 1
+	SBarShadow.Position          = UDim2.new(0.5, 0, 0.5, 0)
+	SBarShadow.Size              = UDim2.new(1, 47, 1, 47)
+	SBarShadow.ZIndex            = 0
+	SBarShadow.Image             = "rbxassetid://6015897843"
+	SBarShadow.ImageColor3       = Color3.fromRGB(50, 0, 100)
+	SBarShadow.ImageTransparency = 0.4
+	SBarShadow.ScaleType         = Enum.ScaleType.Slice
+	SBarShadow.SliceCenter       = Rect.new(49, 49, 450, 450)
+
+	local SBarMain              = Instance.new("Frame")
+	SBarMain.Parent             = SBarShadow
+	SBarMain.AnchorPoint        = Vector2.new(0.5, 0.5)
+	SBarMain.BackgroundColor3   = Color3.fromRGB(12, 0, 25)
+	SBarMain.BackgroundTransparency = 0.05
+	SBarMain.Position           = UDim2.new(0.5, 0, 0.5, 0)
+	SBarMain.Size               = UDim2.new(1, -52, 1, -55)
+	Instance.new("UICorner", SBarMain).CornerRadius = UDim.new(0, 8)
+
+	local SBarStroke     = Instance.new("UIStroke")
+	SBarStroke.Color     = PURPLE
+	SBarStroke.Thickness = 2
+	SBarStroke.Parent    = SBarMain
+
+	local SBarTitle               = Instance.new("TextLabel")
+	SBarTitle.Parent              = SBarMain
+	SBarTitle.AnchorPoint         = Vector2.new(0.5, 0)
+	SBarTitle.BackgroundTransparency = 1
+	SBarTitle.Position            = UDim2.new(0.5, 0, 0, 5)
+	SBarTitle.Size                = UDim2.new(0.96, 0, 0, 18)
+	SBarTitle.FontFace            = Font.new("rbxasset://fonts/families/GothamSSm.json", Enum.FontWeight.Bold, Enum.FontStyle.Normal)
+	SBarTitle.Text                = "TRon Void Hub Ez Bounty  |  Mode: " .. Config["Mode"]
+	SBarTitle.TextColor3          = PURPLE_LIGHT
+	SBarTitle.TextSize            = 14
+	SBarTitle.TextWrapped         = true
+
+	local SBarFarm               = Instance.new("TextLabel")
+	SBarFarm.Name                = "SBarFarm"
+	SBarFarm.Parent              = SBarMain
+	SBarFarm.AnchorPoint         = Vector2.new(0.5, 0)
+	SBarFarm.BackgroundTransparency = 1
+	SBarFarm.Position            = UDim2.new(0.5, 0, 0, 26)
+	SBarFarm.Size                = UDim2.new(0.96, 0, 0, 18)
+	SBarFarm.FontFace            = Font.new("rbxasset://fonts/families/GothamSSm.json", Enum.FontWeight.Regular, Enum.FontStyle.Normal)
+	SBarFarm.Text                = "Iniciando..."
+	SBarFarm.TextColor3          = Color3.fromRGB(220, 180, 255)
+	SBarFarm.TextSize            = 13
+	SBarFarm.TextWrapped         = true
+
+	local BtnGui          = Instance.new("ScreenGui")
+	BtnGui.Name           = "TRonVoidToggleBtn"
+	BtnGui.Parent         = game:GetService("CoreGui")
+	BtnGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	BtnGui.DisplayOrder   = 30
+
+	local BtnFrame            = Instance.new("Frame")
+	BtnFrame.Parent           = BtnGui
+	BtnFrame.AnchorPoint      = Vector2.new(0, 0)
+	BtnFrame.BackgroundColor3 = PURPLE_DARK
+	BtnFrame.Position         = UDim2.new(0, 18, 0.08, 0)
+	BtnFrame.Size             = UDim2.new(0, 52, 0, 52)
+	BtnFrame.Active           = true
+	BtnFrame.Draggable        = true
+	Instance.new("UICorner", BtnFrame).CornerRadius = UDim.new(1, 0)
+
+	local BtnStroke     = Instance.new("UIStroke")
+	BtnStroke.Color     = PURPLE_LIGHT
+	BtnStroke.Thickness = 2.5
+	BtnStroke.Parent    = BtnFrame
+
+	local BtnImg              = Instance.new("ImageLabel")
+	BtnImg.Parent             = BtnFrame
+	BtnImg.AnchorPoint        = Vector2.new(0.5, 0.5)
+	BtnImg.BackgroundTransparency = 1
+	BtnImg.Position           = UDim2.new(0.5, 0, 0.5, 0)
+	BtnImg.Size               = UDim2.new(0, 36, 0, 36)
+	BtnImg.Image              = "rbxassetid://112485471724320"
+
+	local BtnBtn              = Instance.new("TextButton")
+	BtnBtn.Parent             = BtnFrame
+	BtnBtn.BackgroundTransparency = 1
+	BtnBtn.Size               = UDim2.new(1, 0, 1, 0)
+	BtnBtn.Font               = Enum.Font.SourceSans
+	BtnBtn.Text               = ""
+
+	local TwI = TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+
+	BtnBtn.MouseButton1Click:Connect(function()
+		CardGui.Enabled = not CardGui.Enabled
+		blurFx.Size = CardGui.Enabled and 18 or 0
+		TweenService:Create(BtnFrame, TwI, {
+			BackgroundColor3 = CardGui.Enabled and PURPLE or PURPLE_DARK
+		}):Play()
+	end)
+
+	task.spawn(function()
+		while State.running do
+			task.wait(1)
+			SafeCall(function()
+				StatusLbl.Text = "Status: " .. State.status
+				SBarFarm.Text  = State.status
+				TargetLbl.Text = "Alvo Atual: " .. State.targetName
+
+				for _, c in ipairs(PlayerScroll:GetChildren()) do
+					if c:IsA("TextLabel") then c:Destroy() end
+				end
+
+				local validList = GetValidTargets()
+				for i, p in ipairs(validList) do
+					local lv  = GetPlayerLevel(p)
+					local row = Instance.new("TextLabel")
+					row.Parent              = PlayerScroll
+					row.BackgroundTransparency = 1
+					row.Size                = UDim2.new(1, -6, 0, 17)
+					row.LayoutOrder         = i
+					row.FontFace            = Font.new("rbxasset://fonts/families/GothamSSm.json", Enum.FontWeight.Regular, Enum.FontStyle.Normal)
+					row.TextColor3          = (p == State.currentTarget) and Color3.fromRGB(255, 220, 50) or Color3.fromRGB(200, 150, 255)
+					row.TextSize            = 12
+					row.TextXAlignment      = Enum.TextXAlignment.Left
+					row.Text                = "  " .. p.DisplayName .. " (@" .. p.Name .. ")  Lv." .. lv .. (p == State.currentTarget and "  << ALVO" or "")
+				end
+
+				PlayerScroll.CanvasSize = UDim2.new(0, 0, 0, #validList * 20)
+			end)
+		end
+	end)
+end
+
+local function RunNormalMode()
+	State.status = "Modo Normal ativo"
+
+	while State.running do
+		task.wait(0.12)
+		if CheckSafeMode() then task.wait(0.5) continue end
+
+		local targets = GetValidTargets()
+		if #targets == 0 then
+			State.currentTarget = nil
+			State.targetName    = "Nenhum"
+			State.status        = "Nenhum alvo valido no servidor"
+			HopServer()
+			continue
+		end
+
+		local target = GetNearestTarget(targets)
+		if not target then continue end
+
+		State.currentTarget = target
+		State.targetName    = target.DisplayName .. " (@" .. target.Name .. ")"
+		State.status        = "Indo ate: " .. State.targetName
+
+		TeleportToPlayer(target)
+
+		if not IsValidTarget(target) then
+			State.status = "Alvo perdido, buscando proximo..."
+			continue
+		end
+
+		State.status = "Atacando: " .. State.targetName
+
+		while IsValidTarget(target) and State.running do
+			task.wait(0.06)
+			if CheckSafeMode() then break end
+
+			local tchar = target.Character
+			if not tchar then break end
+			local thrp = tchar:FindFirstChild("HumanoidRootPart")
+			if not thrp then break end
+			local myHRP = GetMyHRP()
+			if not myHRP then break end
+
+			if (myHRP.Position - thrp.Position).Magnitude > 14 then
+				TweenTo(thrp.Position)
+			end
+
+			UseSkills()
+
+			State.hopTimer = State.hopTimer + 0.06
+			if State.hopTimer >= Config["Auto Hop After"] then
+				State.hopTimer = 0
+				HopServer()
+				break
+			end
+		end
+
+		State.status = "Alvo perdido, buscando proximo..."
+		task.wait(0.15)
+	end
+end
+
+local function RunSwordMode()
+	State.status = "Modo Sword - Carregando Koby Fast Attack..."
+	LoadKobyAttack()
+	StartFastAttackHeart()
+	task.wait(2)
+
+	State.status = "Modo Sword - Equipando espada..."
+	EquipWeapon("Sword")
+	task.wait(0.8)
+
+	while State.running do
+		task.wait(0.1)
+		if CheckSafeMode() then task.wait(0.5) continue end
+
+		local targets = GetValidTargets()
+		if #targets == 0 then
+			State.currentTarget = nil
+			State.targetName    = "Nenhum"
+			State.status        = "Nenhum alvo no servidor"
+			HopServer()
+			continue
+		end
+
+		State.status = "Modo Sword - Teleportando para todos os alvos..."
+
+		for _, target in ipairs(targets) do
+			if not State.running or CheckSafeMode() then break end
+			if not IsValidTarget(target) then continue end
+
+			State.currentTarget = target
+			State.targetName    = target.DisplayName .. " (@" .. target.Name .. ")"
+			State.status        = "Sword -> " .. State.targetName
+
+			InstantTeleportToPlayer(target)
+			task.wait(0.04)
+			UseSkills()
+			task.wait(0.04)
+		end
+
+		State.status = "Aguardando 6s para re-entrar no time..."
+		local waitStart = tick()
+		while tick() - waitStart < 6 do
+			task.wait(0.3)
+			if CheckSafeMode() then break end
+		end
+
+		JoinTeam(Config["Team"])
+		EquipWeapon("Sword")
+
+		State.hopTimer = State.hopTimer + 6
+		if State.hopTimer >= Config["Auto Hop After"] then
+			State.hopTimer = 0
+			HopServer()
+		end
+	end
+end
+
+local function RunGunMode()
+	State.status = "Modo Gun - Configurando Fast Shot Gun..."
+	SetupGunNet()
+	task.wait(1)
+
+	State.status = "Modo Gun - Equipando arma..."
+	EquipWeapon("Gun")
+	task.wait(0.8)
+
+	local gunLoopActive = true
+	task.spawn(function()
+		while gunLoopActive and State.running do
+			task.wait(0.05)
+			if State.retreating then continue end
+			local char = GetMyChar()
+			if not char then continue end
+			local tool = char:FindFirstChildOfClass("Tool")
+			if not tool or tool:GetAttribute("WeaponType") ~= "Gun" then continue end
+			local tgt = GetNearestGunTarget()
+			if tgt then FireGunShot(tgt) end
+		end
+	end)
+
+	while State.running do
+		task.wait(0.12)
+		if CheckSafeMode() then task.wait(0.5) continue end
+
+		local targets = GetValidTargets()
+		if #targets == 0 then
+			State.currentTarget = nil
+			State.targetName    = "Nenhum"
+			State.status        = "Nenhum alvo no servidor"
+			gunLoopActive       = false
+			HopServer()
+			continue
+		end
+
+		local target = GetNearestTarget(targets)
+		if not target then continue end
+
+		State.currentTarget = target
+		State.targetName    = target.DisplayName .. " (@" .. target.Name .. ")"
+		State.status        = "Gun Mode - Indo ate: " .. State.targetName
+
+		TeleportToPlayer(target)
+
+		if not IsValidTarget(target) then
+			State.status = "Alvo perdido, buscando proximo..."
+			continue
+		end
+
+		EquipWeapon("Gun")
+		State.status = "Atirando em: " .. State.targetName
+
+		while IsValidTarget(target) and State.running do
+			task.wait(0.06)
+			if CheckSafeMode() then break end
+
+			local tchar = target.Character
+			if not tchar then break end
+			local thrp = tchar:FindFirstChild("HumanoidRootPart")
+			if not thrp then break end
+			local myHRP = GetMyHRP()
+			if not myHRP then break end
+
+			if (myHRP.Position - thrp.Position).Magnitude > 35 then
+				TweenTo(thrp.Position)
+			end
+
+			UseSkills()
+
+			State.hopTimer = State.hopTimer + 0.06
+			if State.hopTimer >= Config["Auto Hop After"] then
+				State.hopTimer  = 0
+				gunLoopActive   = false
+				HopServer()
+				break
+			end
+		end
+
+		State.status = "Alvo perdido, buscando proximo..."
+		task.wait(0.15)
+	end
+
+	gunLoopActive = false
+end
 
 task.spawn(function()
-    local wasConnected = true
-    while true do
-        task.wait(2)
-        local ok = pcall(function() Players:GetPlayers() end)
-        if not ok and wasConnected then
-            wasConnected = false
-            onKick()
-        elseif ok then
-            wasConnected = true
-        end
-    end
-end)
+	repeat task.wait(0.1) until game:IsLoaded()
+	repeat task.wait(0.1) until LP and LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
 
-local statusTxt
+	State.status = "Iniciando TRon Void Hub Ez Bounty..."
+	task.wait(1.5)
 
-local function escapeAndTeleport(targ)
-    if ST.escapingZone then return end
-    local myC = ch()
-    local myHRP = myC and myC:FindFirstChild("HumanoidRootPart")
-    if not myHRP then return end
-    ST.escapingZone = true
-    local hum = myC:FindFirstChild("Humanoid")
-    if hum then hum.PlatformStand = true hum.AutoRotate = false end
-    local startY = myHRP.Position.Y
-    local targetY = startY + 2500
-    local t0 = tick()
-    local conn
-    conn = RunService.Heartbeat:Connect(function()
-        local c2 = ch()
-        local hrp = c2 and c2:FindFirstChild("HumanoidRootPart")
-        if not hrp then conn:Disconnect() ST.escapingZone = false return end
-        local a = math.min((tick() - t0) / 1.4, 1)
-        hrp.CFrame = CFrame.new(hrp.Position.X, startY + (targetY - startY) * (1-(1-a)^3), hrp.Position.Z)
-        if a >= 1 then
-            conn:Disconnect()
-            local h2 = c2:FindFirstChild("Humanoid")
-            if h2 then h2.PlatformStand = false h2.AutoRotate = true end
-            local thrp = targ and targ.Character and targ.Character:FindFirstChild("HumanoidRootPart")
-            if thrp then pcall(function() hrp.CFrame = thrp.CFrame * CFrame.new(0,2,3) getgenv().targ = targ end) end
-            ST.escapingZone = false
-        end
-    end)
-    task.spawn(function()
-        task.wait(0.5)
-        if not ST.escapingZone then return end
-        local thrp = targ and targ.Character and targ.Character:FindFirstChild("HumanoidRootPart")
-        local hrp2 = ch() and ch():FindFirstChild("HumanoidRootPart")
-        if thrp and hrp2 and not inSafe(thrp) then
-            conn:Disconnect()
-            local h3 = ch() and ch():FindFirstChild("Humanoid")
-            if h3 then h3.PlatformStand = false h3.AutoRotate = true end
-            pcall(function() hrp2.CFrame = thrp.CFrame * CFrame.new(0,2,3) end)
-            getgenv().targ = targ
-            ST.escapingZone = false
-        end
-    end)
-end
+	JoinTeam(Config["Team"])
 
-task.spawn(function()
-    repeat task.wait() until game:IsLoaded() and lp.Character
-    pcall(function()
-        loadstring(game:HttpGet("https://raw.githubusercontent.com/AnhDangNhoEm/TuanAnhIOS/refs/heads/main/koby"))()
-    end)
-end)
+	State.status = "Carregando Interface..."
+	BuildUI()
+	task.wait(0.5)
 
-task.spawn(function()
-    while true do
-        task.wait(1)
-        pcall(function()
-            local c = ch() if not c then return end
-            local hum = c:FindFirstChild("Humanoid")
-            if not hum or hum.Health <= 0 then return end
-            local cf = game.ReplicatedStorage:FindFirstChild("Remotes") and
-                       game.ReplicatedStorage.Remotes:FindFirstChild("CommF_")
-            if not cf then return end
-            cf:InvokeServer("BusoHaki", true)
-            cf:InvokeServer("KenbunHaki", true)
-        end)
-    end
-end)
+	if Config["Fix Lag"] then
+		ApplyFixLag()
+		task.wait(0.5)
+	end
 
-task.spawn(function()
-    while true do
-        task.wait(0.5)
-        pcall(function()
-            local c = ch() if not c then return end
-            local tool = c:FindFirstChildOfClass("Tool")
-            if tool and tool.ToolTip == "Blox Fruit" then return end
-            local bp = lp:FindFirstChild("Backpack") if not bp then return end
-            for _, item in ipairs(bp:GetChildren()) do
-                if item:IsA("Tool") and item.ToolTip == "Blox Fruit" then
-                    c:FindFirstChildOfClass("Humanoid"):EquipTool(item) return
-                end
-            end
-        end)
-    end
-end)
+	if Config["Auto Race V3"] or Config["Auto Race V4"] then
+		State.status = "Ativando Raca..."
+		ActivateRace()
+		task.wait(0.5)
+	end
 
-local lockConn, charConn, searching = nil, nil, false
+	State.status = "Carregando dados dos jogadores do servidor..."
+	task.wait(1)
 
-local function showNotif(name)
-    pcall(function()
-        game:GetService("StarterGui"):SetCore("SendNotification", {
-            Title = "⚡ TRon Void  |  Alvo",
-            Text  = "Atacando: " .. name,
-            Duration = 4,
-        })
-    end)
-end
+	State.status = "Pronto! Iniciando Modo: " .. Config["Mode"]
+	task.wait(0.5)
 
-local function getValidTargets()
-    local list = {}
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= lp and p.Character then
-            local hrp = p.Character:FindFirstChild("HumanoidRootPart")
-            local hum = p.Character:FindFirstChild("Humanoid")
-            if hrp and hum and hum.Health > 0 and not inSafe(hrp) and not checkRaid(p) then
-                table.insert(list, p)
-            end
-        end
-    end
-    return list
-end
-
-local lockOnTarget
-lockOnTarget = function(targ)
-    if not targ or not targ.Character then return end
-    local thrp = targ.Character:FindFirstChild("HumanoidRootPart") if not thrp then return end
-    local myC = ch()
-    local myHRP = myC and myC:FindFirstChild("HumanoidRootPart")
-    if myHRP then pcall(function() myHRP.CFrame = thrp.CFrame * CFrame.new(0,2,3) end) end
-    getgenv().targ = targ
-    showNotif(targ.Name)
-    local function onDeath()
-        if lockConn then lockConn:Disconnect() lockConn = nil end
-        if charConn then charConn:Disconnect() charConn = nil end
-        task.wait(0.2)
-        getgenv().targ = nil
-        ST.targIdx += 1
-        task.spawn(function()
-            local list = getValidTargets()
-            if #list == 0 then searching = true repeat task.wait(1) list = getValidTargets() until #list > 0 searching = false end
-            lockOnTarget(list[(ST.targIdx - 1) % #list + 1])
-        end)
-    end
-    local hum = targ.Character:FindFirstChild("Humanoid")
-    if hum then lockConn = hum.Died:Connect(onDeath) end
-    charConn = targ.CharacterRemoving:Connect(function()
-        if getgenv().targ == targ then onDeath() end
-    end)
-end
-
-task.spawn(function()
-    repeat task.wait() until game:IsLoaded() and lp.Character
-    task.wait(3)
-    local list = getValidTargets()
-    if #list == 0 then searching = true repeat task.wait(1) list = getValidTargets() until #list > 0 searching = false end
-    lockOnTarget(list[1])
-end)
-
-task.spawn(function()
-    while true do
-        task.wait(1)
-        local targ = getgenv().targ
-        if not targ or not targ.Character then continue end
-        local myC = ch()
-        local myHRP = myC and myC:FindFirstChild("HumanoidRootPart")
-        local thrp = targ.Character:FindFirstChild("HumanoidRootPart")
-        local hum  = targ.Character:FindFirstChild("Humanoid")
-
-        local myHRP_safe = myHRP and inSafe(myHRP)
-        if myHRP_safe and not ST.escapingZone then
-            local list = getValidTargets()
-            task.spawn(function() escapeAndTeleport(#list > 0 and list[1] or nil) end)
-        elseif myHRP and thrp and hum and hum.Health > 0 then
-            pcall(function() myHRP.CFrame = thrp.CFrame * CFrame.new(0,2,3) end)
-        end
-    end
-end)
-
-RunService.Heartbeat:Connect(function()
-    local targ = getgenv().targ
-    if not targ or not targ.Character then return end
-    local c = ch() if not c then return end
-    local tool = c:FindFirstChildOfClass("Tool")
-    if not tool or tool.ToolTip ~= "Blox Fruit" then return end
-    local th = targ.Character:FindFirstChild("HumanoidRootPart") if not th then return end
-    if inSafe(th) or checkRaid(targ) then return end
-    local lcr = tool:FindFirstChild("LeftClickRemote") if not lcr then return end
-    lcr:FireServer(Vector3.new(0.01,-500,0.01), 1, true)
-    lcr:FireServer(false)
-end)
-
-task.spawn(function()
-    while true do
-        task.wait(1)
-        ST.hopTimer += 1
-        if ST.hopTimer >= HOP_INTERVAL then
-            ST.hopTimer = 0
-            task.spawn(hopServer)
-        end
-        local cur = getCurrentBounty()
-        local d = cur - ST.lastBounty
-        if d > 0 then ST.bountyEarned += d end
-        ST.lastBounty = cur
-    end
-end)
-
-local guiParent = (typeof(gethui) == "function" and gethui()) or game:GetService("CoreGui")
-
-local sg = Instance.new("ScreenGui")
-sg.Name = "AutoBountyUI"
-sg.ResetOnSpawn = false
-sg.IgnoreGuiInset = true
-sg.Parent = guiParent
-
-local main = Instance.new("Frame", sg)
-main.Size = UDim2.new(0, 300, 0, 270)
-main.Position = UDim2.new(0.5, -150, 0.5, -135)
-main.BackgroundColor3 = Color3.fromRGB(8, 4, 18)
-main.BorderSizePixel = 0
-main.ClipsDescendants = true
-Instance.new("UICorner", main).CornerRadius = UDim.new(0, 12)
-local ms = Instance.new("UIStroke", main)
-ms.Color = Color3.fromRGB(90, 0, 160)
-ms.Thickness = 2
-
-local dragging, dragStart, startPos = false, nil, nil
-main.InputBegan:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging=true dragStart=i.Position startPos=main.Position end end)
-main.InputEnded:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging=false end end)
-UserInput.InputChanged:Connect(function(i)
-    if dragging and i.UserInputType == Enum.UserInputType.MouseMovement then
-        local d = i.Position - dragStart
-        main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset+d.X, startPos.Y.Scale, startPos.Y.Offset+d.Y)
-    end
-end)
-
-local titleBar = Instance.new("Frame", main)
-titleBar.Size = UDim2.new(1,0,0,40)
-titleBar.BackgroundColor3 = Color3.fromRGB(18,0,40)
-titleBar.BorderSizePixel = 0
-Instance.new("UICorner", titleBar).CornerRadius = UDim.new(0,12)
-local tcFix = Instance.new("Frame", titleBar)
-tcFix.Size = UDim2.new(1,0,0.5,0) tcFix.Position = UDim2.new(0,0,0.5,0)
-tcFix.BackgroundColor3 = Color3.fromRGB(18,0,40) tcFix.BorderSizePixel = 0
-
-local titleLbl = Instance.new("TextLabel", titleBar)
-titleLbl.Size = UDim2.new(0.72,0,1,0) titleLbl.Position = UDim2.new(0,14,0,0)
-titleLbl.BackgroundTransparency = 1
-titleLbl.Text = "⚡ AUTO BOUNTY M1  |  TRon Void"
-titleLbl.TextColor3 = Color3.fromRGB(190,90,255) titleLbl.TextSize = 12
-titleLbl.Font = Enum.Font.GothamBold titleLbl.TextXAlignment = Enum.TextXAlignment.Left
-
-local sPill = Instance.new("Frame", titleBar)
-sPill.Size = UDim2.new(0,66,0,18) sPill.Position = UDim2.new(1,-74,0.5,-9)
-sPill.BackgroundColor3 = Color3.fromRGB(50,0,100) sPill.BorderSizePixel = 0
-Instance.new("UICorner", sPill).CornerRadius = UDim.new(1,0)
-statusTxt = Instance.new("TextLabel", sPill)
-statusTxt.Size = UDim2.new(1,0,1,0) statusTxt.BackgroundTransparency = 1
-statusTxt.Text = "● ATIVO" statusTxt.TextColor3 = Color3.fromRGB(185,80,255)
-statusTxt.TextSize = 10 statusTxt.Font = Enum.Font.GothamBold
-TweenService:Create(sPill, TweenInfo.new(1.1,Enum.EasingStyle.Sine,Enum.EasingDirection.InOut,-1,true),
-    {BackgroundColor3 = Color3.fromRGB(85,0,165)}):Play()
-
-local infoFrame = Instance.new("Frame", main)
-infoFrame.Size = UDim2.new(1,-18,0,170)
-infoFrame.Position = UDim2.new(0,9,0,50)
-infoFrame.BackgroundColor3 = Color3.fromRGB(13,4,28)
-infoFrame.BorderSizePixel = 0
-Instance.new("UICorner", infoFrame).CornerRadius = UDim.new(0,10)
-local ifs = Instance.new("UIStroke", infoFrame)
-ifs.Color = Color3.fromRGB(50,0,100) ifs.Thickness = 1
-
-local function makeRow(y, icon, label)
-    local row = Instance.new("Frame", infoFrame)
-    row.Size = UDim2.new(1,-16,0,28) row.Position = UDim2.new(0,8,0,y)
-    row.BackgroundTransparency = 1
-    local sep = Instance.new("Frame", row)
-    sep.Size = UDim2.new(1,0,0,1) sep.Position = UDim2.new(0,0,1,-1)
-    sep.BackgroundColor3 = Color3.fromRGB(35,0,70) sep.BorderSizePixel = 0
-    local lbl = Instance.new("TextLabel", row)
-    lbl.Size = UDim2.new(0.56,0,1,0) lbl.BackgroundTransparency = 1
-    lbl.Text = icon.." "..label lbl.TextColor3 = Color3.fromRGB(135,65,185)
-    lbl.TextSize = 11 lbl.Font = Enum.Font.GothamSemibold lbl.TextXAlignment = Enum.TextXAlignment.Left
-    local val = Instance.new("TextLabel", row)
-    val.Size = UDim2.new(0.44,0,1,0) val.Position = UDim2.new(0.56,0,0,0)
-    val.BackgroundTransparency = 1 val.Text = "—"
-    val.TextColor3 = Color3.fromRGB(220,165,255) val.TextSize = 11
-    val.Font = Enum.Font.GothamBold val.TextXAlignment = Enum.TextXAlignment.Right
-    return val
-end
-
-local valBounty = makeRow(6,   "💰", "Bounty Atual")
-local valTeam   = makeRow(38,  "🏴", "Team")
-local valPVP    = makeRow(70,  "⚔",  "PVP Fora Zona")
-local valEarned = makeRow(102, "📈", "Bounty Farmado")
-local valTimer  = makeRow(134, "⏱",  "Próx. Hop")
-
-local resetBtn = Instance.new("TextButton", main)
-resetBtn.Size = UDim2.new(1,-18,0,34)
-resetBtn.Position = UDim2.new(0,9,0,230)
-resetBtn.BackgroundColor3 = Color3.fromRGB(18,0,40)
-resetBtn.BorderSizePixel = 0
-resetBtn.Text = "🔄  Reset Bounty Earned"
-resetBtn.TextColor3 = Color3.fromRGB(175,85,255)
-resetBtn.TextSize = 12 resetBtn.Font = Enum.Font.GothamSemibold
-Instance.new("UICorner", resetBtn).CornerRadius = UDim.new(0,10)
-local rbs = Instance.new("UIStroke", resetBtn)
-rbs.Color = Color3.fromRGB(90,0,160) rbs.Thickness = 1
-resetBtn.MouseButton1Click:Connect(function()
-    ST.bountyEarned = 0
-    TweenService:Create(resetBtn, TweenInfo.new(0.12), {BackgroundColor3 = Color3.fromRGB(55,0,115)}):Play()
-    task.wait(0.12)
-    TweenService:Create(resetBtn, TweenInfo.new(0.12), {BackgroundColor3 = Color3.fromRGB(18,0,40)}):Play()
-end)
-
-RunService.Heartbeat:Connect(function()
-    valBounty.Text = tostring(getCurrentBounty())
-    valTeam.Text   = getTeamName()
-    valPVP.Text    = tostring(getPVPCount())
-    valEarned.Text = tostring(ST.bountyEarned)
-    local rem = HOP_INTERVAL - ST.hopTimer
-    valTimer.Text  = ("%d:%02d"):format(math.floor(rem/60), rem%60)
-    statusTxt.Text = ST.escapingZone and "🟡 SAINDO ZONA" or "● ATIVO"
+	if Config["Mode"] == "Normal" then
+		RunNormalMode()
+	elseif Config["Mode"] == "Sword" then
+		RunSwordMode()
+	elseif Config["Mode"] == "Gun" then
+		RunGunMode()
+	else
+		State.status = "Modo invalido na config: " .. tostring(Config["Mode"])
+	end
 end)
